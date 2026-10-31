@@ -1,0 +1,13 @@
+_ > nanoagent.plugin.v0001.ProductConfig:
+tagline: "Find concepts that research papers often pair, with a Count-Min Sketch on a budget"
+summary: "Pick a corpus of ACL Anthology papers and a threshold k, and an agent finds every pair of research concepts that appears together in at least k papers. A Count-Min Sketch with a fixed number of counters proposes candidates, and only a fixed number of pairs may be counted exactly, so the agent has to shape its sketch well. Every answer is checked against an exact count."
+highlights:
+  - "Real co-occurrence data: 21,934 ACL Anthology papers from 2016 to 2024, matched against 493 NLP concepts"
+  - "A memory budget far below the number of pairs makes the sketch's width and depth matter"
+  - "The verifier checks precision, recall, both budgets and that every submitted pair was really counted"
+  - "Runs offline on bundled data, in integer arithmetic"
+steps:
+  - "Choose a corpus, a threshold k, a memory budget, a query budget and the recall you require"
+  - "The agent picks the sketch's width and depth and streams every concept pair into it"
+  - "It counts the highest estimated candidates exactly within the query budget"
+  - "It submits the pairs that reach k, and the verdict shows the recall it reached"
