@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nanoagent-concept-cooccurrence-query"
-version = "0.1.3"
+version = "0.1.4"
 description = "Find frequently co-occurring concept pairs with a Count-Min Sketch under memory and query budgets: a NanoAgent plugin"
 requires-python = ">=3.12"
 dependencies = ["mcp>=1.27,<2", "slimconfig"]
