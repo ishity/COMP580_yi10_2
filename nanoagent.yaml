@@ -1,7 +1,7 @@
 _ > nanoagent.plugin.v0001.ManifestConfig:
 id: concept-cooccurrence-query
 name: Concept Co-occurrence Query
-version: 0.1.2
+version: 0.1.3
 status: ready
 spec: nanoagent.plugin/v0001
 
@@ -35,6 +35,7 @@ tasks > dict[contract.Task, nanoagent.plugin.v0001.TaskConfig]:
     reference: exact_frequent_pairs
     instructions: |-
       Find every pair of concepts that appear together in at least min_count papers of the dataset. A Count-Min Sketch proposes candidate pairs and count_pairs confirms them. Two budgets apply. memory_budget is the most counters all your sketches may use together: it is cumulative over every build_sketch call, so a trial sketch spends counters the final sketch can no longer use. query_budget is the most distinct pairs count_pairs may count over all its calls. Counting every pair is usually far over the query budget.
+      Keep each step short: every reply is limited to about 2,000 tokens, and a reply that runs out before calling a tool ends the task, so call a tool after brief reasoning instead of computing estimates by hand.
       Start with describe_corpus: it gives the number of papers and concepts, how many distinct pairs occur together, N (the total pair occurrences in the stream: each paper's concept pairs, summed), and how many hash rows a sketch may use.
       Then call build_sketch with width and depth. The sketch has depth rows of width counters each, width times depth counters in all, charged to memory_budget. Every pair occurrence adds 1 to one counter in each row, chosen by that row's fixed hash. A pair's estimate is the least of its depth counters. An estimate is never below the pair's true count; it is above it when other pairs share its counters. More width spreads the pairs over more counters, so fewer pairs collide and estimates come closer to the truth. More depth takes the minimum over more rows, so a pair is overestimated only if it collides in every row; but at a fixed memory budget each extra row makes every row narrower. The standard bound: with probability at least 1 - e^(-depth), an estimate exceeds the true count by at most e times N divided by width, e being about 2.718.
       build_sketch looks up every pair that occurs in the corpus and keeps as candidates those estimated at min_count or more. Since no estimate is too low, every qualifying pair is a candidate. The candidates are saved in the workspace, ranked by estimate, highest first, because higher estimates are more likely to belong to qualifying pairs. You get back the sketch_id, the counters charged and remaining, how many candidates there are, and a histogram: buckets of candidates by estimate, highest first, each with its lowest and highest estimate, how many candidates it holds, and its rank range, first_rank to last_rank. Building a sketch with the same width and depth again is not charged again. A sketch that would exceed the remaining memory is refused, and the error says the largest width that fits.
