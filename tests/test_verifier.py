@@ -9,10 +9,11 @@ from slimconfig import build_output, plain_output
 import verifier
 from contract import TASKS, TOOLS, CountInput, Dataset, ExactOutput, FindInput, SketchInput, Task, Tool
 from plugin import build_sketch, count_pairs, exact_frequent_pairs
-from plugin.bundle import LEDGER
+from plugin.bundle import instance, ledger_path
 
 EDGE = {"dataset": "edge-cases", "min_count": 3, "memory_budget": 16, "query_budget": 8, "min_recall": "1.0"}
 EMPTY = {"dataset": "acl-small", "min_count": 100, "memory_budget": 500, "query_budget": 100, "min_recall": "1.0"}
+SMALL = {"dataset": "acl-small", "min_count": 10, "memory_budget": 1000, "query_budget": 500, "min_recall": "0.90"}
 FULL = {"dataset": "acl-full", "min_count": 55, "memory_budget": 3000, "query_budget": 400, "min_recall": "0.95"}
 AT_K = {"a": "alpha", "b": "beta"}  # count exactly k = 3
 
@@ -36,6 +37,16 @@ def verify_input(tool: Tool, value: dict) -> dict:
     return verifier.verify_input(tool.value, build_output(value, TOOLS[tool][0]))
 
 
+def ledger_file(workspace: Path, arguments: dict) -> Path:
+    """Where the tools keep the ledger of the task instance ``arguments``."""
+    values = (arguments["min_count"], arguments["memory_budget"], arguments["query_budget"])
+    return ledger_path(workspace, instance(Dataset(arguments["dataset"]), *values))
+
+
+def read_ledger(workspace: Path, arguments: dict = EDGE) -> dict:
+    return json.loads(ledger_file(workspace, arguments).read_text())
+
+
 def reference(arguments: dict) -> list[dict]:
     found = exact_frequent_pairs(build_output(arguments, FindInput), Path("."))
     return [{"a": pair.a, "b": pair.b} for pair in found.pairs]
@@ -45,10 +56,16 @@ def solved(workspace: Path, arguments: dict, width: int, depth: int, last_rank: 
     """Build a sketch, count ranks 1 to ``last_rank`` (every candidate when None) and return the qualifying pairs."""
     dataset = Dataset(arguments["dataset"])
     k, memory, query = arguments["min_count"], arguments["memory_budget"], arguments["query_budget"]
-    made = build_sketch(SketchInput(dataset, width, depth, k, memory), workspace)
-    found = count_pairs(
-        CountInput(dataset, made.sketch_id, 1, made.candidates if last_rank is None else last_rank, k, query), workspace
+    made = build_sketch(SketchInput(dataset, width, depth, k, memory, query), workspace)
+    given = CountInput(dataset, made.sketch_id, 1, made.candidates if last_rank is None else last_rank, k, memory, query)
+    found = count_pairs(given, workspace)
+    verdict = verifier.verify_output(
+        Tool.COUNT_PAIRS.value,
+        build_output(plain_output(given), CountInput),
+        build_output(plain_output(found), TOOLS[Tool.COUNT_PAIRS][1]),
+        str(workspace),
     )
+    assert verdict["valid"] is True, verdict
     return [{"a": pair.a, "b": pair.b} for pair in found.qualifying]
 
 
@@ -78,7 +95,7 @@ def test_a_pair_at_exactly_k_qualifies_and_one_at_k_minus_1_does_not(tmp_path: P
 
 
 def test_a_concept_repeated_in_a_paper_counts_once(tmp_path: Path, edge: list[dict]) -> None:
-    ledger = json.loads((tmp_path / LEDGER).read_text())
+    ledger = read_ledger(tmp_path)
     counts = {(pair["a"], pair["b"]): pair["count"] for pair in ledger["counts"][0]["qualifying"]}
     assert counts[("beta", "gamma")] == 4  # 4 papers, one of them listing gamma twice
     assert verify_task(EDGE, edge, tmp_path)["valid"] is True
@@ -123,23 +140,21 @@ def test_refuses_a_malformed_pair(tmp_path: Path, edge: list[dict], pair: dict, 
 
 
 def test_refuses_sketches_over_the_memory_budget(tmp_path: Path, edge: list[dict]) -> None:
-    ledger = json.loads((tmp_path / LEDGER).read_text())
-    (tmp_path / LEDGER).write_text(json.dumps(ledger | {"memory_budget": 10}))
+    ledger_file(tmp_path, EDGE | {"memory_budget": 10}).write_text(json.dumps(read_ledger(tmp_path) | {"memory_budget": 10}))
     verdict = verify_task(EDGE | {"memory_budget": 10}, edge, tmp_path, task=EDGE)
     assert verdict["valid"] is False and "use 16 counters, over the memory budget of 10" in verdict["message"]
 
 
 def test_refuses_a_rebuilt_sketch_charged_nothing_the_first_time(tmp_path: Path, edge: list[dict]) -> None:
-    ledger = json.loads((tmp_path / LEDGER).read_text())
+    ledger = read_ledger(tmp_path)
     ledger["sketches"][0]["charged"] = 0
-    (tmp_path / LEDGER).write_text(json.dumps(ledger))
+    ledger_file(tmp_path, EDGE).write_text(json.dumps(ledger))
     verdict = verify_task(EDGE, edge, tmp_path)
     assert verdict["valid"] is False and "charges sketch edge-cases-w8-d2 0 counters, not 16" in verdict["message"]
 
 
 def test_refuses_counts_over_the_query_budget(tmp_path: Path, edge: list[dict]) -> None:
-    ledger = json.loads((tmp_path / LEDGER).read_text())
-    (tmp_path / LEDGER).write_text(json.dumps(ledger | {"query_budget": 2}))
+    ledger_file(tmp_path, EDGE | {"query_budget": 2}).write_text(json.dumps(read_ledger(tmp_path) | {"query_budget": 2}))
     verdict = verify_task(EDGE | {"query_budget": 2}, edge, tmp_path, task=EDGE)
     assert verdict["valid"] is False and "3 distinct pairs were counted, over the query budget of 2" in verdict["message"]
 
@@ -150,22 +165,57 @@ def test_refuses_counts_over_the_query_budget(tmp_path: Path, edge: list[dict]) 
     ids=["memory_budget", "query_budget", "min_count", "dataset"],
 )
 def test_refuses_a_ledger_of_another_task(tmp_path: Path, edge: list[dict], changes: dict) -> None:
-    verdict = verify_task(EDGE | changes, [], tmp_path)
+    ledger_file(tmp_path, EDGE).write_text(json.dumps(read_ledger(tmp_path) | changes))
+    verdict = verify_task(EDGE, edge, tmp_path)
     assert verdict["valid"] is False and "the ledger is for another" in verdict["message"]
 
 
+@pytest.mark.parametrize("changes", [{"memory_budget": 20}, {"query_budget": 9}], ids=["memory_budget", "query_budget"])
+def test_another_instance_does_not_see_this_ones_ledger(tmp_path: Path, edge: list[dict], changes: dict) -> None:
+    verdict = verify_task(EDGE | changes, edge, tmp_path)
+    assert verdict["valid"] is False and "no ledger for this task" in verdict["message"]
+
+
+def test_two_instances_share_a_workspace(tmp_path: Path, edge: list[dict]) -> None:
+    """A workspace that outlives a run: an edge-cases ledger must not lock out the next instance."""
+    small = solved(tmp_path, SMALL, 333, 3, last_rank=500)
+    verdict = verify_task(SMALL, small, tmp_path)
+    assert verdict["valid"] is True and verdict["details"]["submitted"] == 108
+    assert verify_task(EDGE, edge, tmp_path)["valid"] is True
+    assert sorted(path.name for path in (tmp_path / "ledgers").iterdir()) == [
+        "acl-small-k10-m1000-q500.json", "edge-cases-k3-m16-q8.json"
+    ]
+
+
+@pytest.mark.parametrize(("arguments", "width", "depth", "last_rank", "found"), [
+    (EDGE, 8, 2, None, 2), (SMALL, 333, 3, 500, 108)
+], ids=["edge-cases", "acl-small"])
+def test_the_same_instance_passes_when_run_twice_in_one_workspace(
+    tmp_path: Path, arguments: dict, width: int, depth: int, last_rank: int | None, found: int
+) -> None:
+    first = solved(tmp_path, arguments, width, depth, last_rank)
+    assert verify_task(arguments, first, tmp_path)["valid"] is True
+    second = solved(tmp_path, arguments, width, depth, last_rank)  # every pair is skipped now, so free
+    assert second == first and len(second) == found
+    ledger = read_ledger(tmp_path, arguments)
+    verdict = verify_task(arguments, second, tmp_path)
+    assert verdict["valid"] is True and verdict["details"]["counted"] == len(ledger["counts"][0]["counted"])
+    assert [sketch["charged"] for sketch in ledger["sketches"]] == [width * depth, 0]
+    assert ledger["counts"][1]["counted"] == [] and ledger["counts"][1]["qualifying"] == []
+
+
 def test_refuses_a_ledger_that_counts_a_pair_twice(tmp_path: Path, edge: list[dict]) -> None:
-    ledger = json.loads((tmp_path / LEDGER).read_text())
+    ledger = read_ledger(tmp_path)
     ledger["counts"].append(ledger["counts"][0] | {"qualifying": []})
-    (tmp_path / LEDGER).write_text(json.dumps(ledger))
+    ledger_file(tmp_path, EDGE).write_text(json.dumps(ledger))
     verdict = verify_task(EDGE, edge, tmp_path)
     assert verdict["valid"] is False and "counts a pair twice" in verdict["message"]
 
 
 def test_refuses_pairs_without_a_ledger(tmp_path: Path, edge: list[dict]) -> None:
-    (tmp_path / LEDGER).unlink()
+    ledger_file(tmp_path, EDGE).unlink()
     verdict = verify_task(EDGE, edge, tmp_path)
-    assert verdict["valid"] is False and f"no {LEDGER}" in verdict["message"]
+    assert verdict["valid"] is False and "no ledger for this task, ledgers/edge-cases-k3-m16-q8.json" in verdict["message"]
 
 
 def test_refuses_a_qualifying_pair_that_was_never_counted(tmp_path: Path) -> None:
@@ -178,9 +228,9 @@ def test_refuses_a_qualifying_pair_that_was_never_counted(tmp_path: Path) -> Non
 
 
 def test_refuses_a_pair_recorded_with_another_count(tmp_path: Path, edge: list[dict]) -> None:
-    ledger = json.loads((tmp_path / LEDGER).read_text())
+    ledger = read_ledger(tmp_path)
     ledger["counts"][0]["qualifying"][0]["count"] += 1
-    (tmp_path / LEDGER).write_text(json.dumps(ledger))
+    ledger_file(tmp_path, EDGE).write_text(json.dumps(ledger))
     verdict = verify_task(EDGE, edge, tmp_path)
     assert verdict["valid"] is False and "not its exact" in verdict["message"]
 
@@ -211,10 +261,10 @@ def test_the_full_instance_passes_a_good_sketch_and_fails_a_shallow_one(tmp_path
         (Tool.EXACT_FREQUENT_PAIRS, EDGE | {"min_recall": "0"}, False),
         (Tool.EXACT_FREQUENT_PAIRS, EDGE | {"min_count": 0}, False),
         (Tool.EXACT_FREQUENT_PAIRS, EDGE | {"query_budget": 0}, False),
-        (Tool.BUILD_SKETCH, {"dataset": "acl-full", "width": 1500, "depth": 2, "min_count": 55, "memory_budget": 3000}, True),
-        (Tool.BUILD_SKETCH, {"dataset": "acl-full", "width": 1501, "depth": 2, "min_count": 55, "memory_budget": 3000}, False),
-        (Tool.BUILD_SKETCH, {"dataset": "acl-full", "width": 10, "depth": 17, "min_count": 55, "memory_budget": 3000}, False),
-        (Tool.BUILD_SKETCH, {"dataset": "acl-full", "width": 0, "depth": 2, "min_count": 55, "memory_budget": 3000}, False),
+        (Tool.BUILD_SKETCH, {"dataset": "acl-full", "width": 1500, "depth": 2, "min_count": 55, "memory_budget": 3000, "query_budget": 400}, True),
+        (Tool.BUILD_SKETCH, {"dataset": "acl-full", "width": 1501, "depth": 2, "min_count": 55, "memory_budget": 3000, "query_budget": 400}, False),
+        (Tool.BUILD_SKETCH, {"dataset": "acl-full", "width": 10, "depth": 17, "min_count": 55, "memory_budget": 3000, "query_budget": 400}, False),
+        (Tool.BUILD_SKETCH, {"dataset": "acl-full", "width": 0, "depth": 2, "min_count": 55, "memory_budget": 3000, "query_budget": 400}, False),
     ],
 )
 def test_checks_what_the_types_cannot_say(tool: Tool, value: dict, valid: bool) -> None:
@@ -223,8 +273,8 @@ def test_checks_what_the_types_cannot_say(tool: Tool, value: dict, valid: bool) 
 
 @pytest.mark.parametrize(
     ("changes", "valid"),
-    [({}, True), ({"sketch_id": "acl-full-w8-d2"}, False), ({"sketch_id": "acl-small-8x2"}, False), ({"count": 0}, False)],
+    [({}, True), ({"sketch_id": "acl-full-w8-d2"}, False), ({"sketch_id": "acl-small-8x2"}, False), ({"count": 0}, False), ({"memory_budget": 0}, False)],
 )
 def test_checks_a_count_call(changes: dict, valid: bool) -> None:
     value = {"dataset": "acl-small", "sketch_id": "acl-small-w333-d3", "start_rank": 1, "count": 100}
-    assert verify_input(Tool.COUNT_PAIRS, value | {"min_count": 10, "query_budget": 500} | changes)["valid"] is valid
+    assert verify_input(Tool.COUNT_PAIRS, value | {"min_count": 10, "memory_budget": 1000, "query_budget": 500} | changes)["valid"] is valid

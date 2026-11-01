@@ -4,9 +4,9 @@ import json
 import re
 from pathlib import Path
 
-from .rule import DECIMAL_RULE, histogram, parse_decimal
+from .rule import DECIMAL_RULE, histogram, instance_name, parse_decimal
 
-LEDGER = "ledger.json"
+LEDGERS = "ledgers"
 CANDIDATES = "candidates"
 HASH_ROWS = 16  # how many rows src/plugin/data/hashes.json holds
 
@@ -29,6 +29,31 @@ def decimal_problem(text, name):
 def sketch_id_problem(dataset, sketch_id):
     if not re.fullmatch(re.escape(dataset.value) + r"-w[1-9][0-9]*-d[1-9][0-9]*", sketch_id):
         return f"sketch_id {sketch_id!r} is not a {dataset.value} sketch, {dataset.value}-w<width>-d<depth>"
+    return None
+
+
+def instance_of(value):
+    """The instance name of a task input or tool input: its dataset, min_count and both budgets."""
+    return instance_name(value.dataset.value, value.min_count, value.memory_budget, value.query_budget)
+
+
+def ledger_file(workspace, name):
+    return Path(workspace) / LEDGERS / f"{name}.json"
+
+
+def candidates_file(workspace, name, sketch_id):
+    return Path(workspace) / CANDIDATES / name / f"{sketch_id}.json"
+
+
+def ledger_problem(ledger, value):
+    """What is wrong when a ledger's locked values are not ``value``'s, or None."""
+    if (ledger["dataset"], ledger["min_count"], ledger["memory_budget"], ledger["query_budget"]) != (
+        value.dataset.value,
+        value.min_count,
+        value.memory_budget,
+        value.query_budget,
+    ):
+        return "the ledger is for another dataset, min_count, memory_budget or query_budget than the task"
     return None
 
 

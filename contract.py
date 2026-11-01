@@ -47,6 +47,16 @@ class CountedPair(Output):
 
 
 @dataclass
+class QualifyingPair(Output):
+    a: Annotated[str, CONCEPT_A]
+    b: Annotated[str, CONCEPT_B]
+    count: Annotated[int, "How many papers hold both concepts, counted exactly"]
+    previously_counted: Annotated[
+        bool, "Whether an earlier call, perhaps in an earlier run of this task, counted the pair, so it was skipped"
+    ]
+
+
+@dataclass
 class EstimateBucket(Output):
     min_estimate: Annotated[int, "The lowest sketch estimate among this bucket's candidates"]
     max_estimate: Annotated[int, "The highest sketch estimate among this bucket's candidates"]
@@ -77,6 +87,7 @@ class SketchInput(Output):
     depth: Annotated[int, "How many hash rows the sketch uses, from 1 to hash_rows"]
     min_count: Annotated[int, MIN_COUNT]
     memory_budget: Annotated[int, MEMORY_BUDGET]
+    query_budget: Annotated[int, QUERY_BUDGET]
 
 
 @dataclass
@@ -98,12 +109,16 @@ class CountInput(Output):
     start_rank: Annotated[int, "The rank of the first candidate to count, from 1"]
     count: Annotated[int, "How many candidates to count from start_rank on, at least 1"]
     min_count: Annotated[int, MIN_COUNT]
+    memory_budget: Annotated[int, MEMORY_BUDGET]
     query_budget: Annotated[int, QUERY_BUDGET]
 
 
 @dataclass
 class CountOutput(Output):
-    qualifying: Annotated[list[CountedPair], "The newly counted pairs in the range that qualify, in rank order"]
+    qualifying: Annotated[
+        list[QualifyingPair],
+        "The pairs in the range that qualify, in rank order: those counted now, and those an earlier call counted",
+    ]
     counted: Annotated[int, "How many pairs in the range were counted now and charged to the query budget"]
     skipped: Annotated[int, "How many pairs in the range an earlier call counted, so not counted or charged again"]
     total_counted: Annotated[int, "How many distinct pairs all calls so far have counted"]

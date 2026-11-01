@@ -12,10 +12,10 @@ from itertools import combinations
 from pathlib import Path
 
 from contract import Dataset
-from plugin.rule import DECIMAL_RULE, parse_decimal
+from plugin.rule import DECIMAL_RULE, instance_name, parse_decimal
 
 DATA = Path(__file__).with_name("data")
-LEDGER = "ledger.json"
+LEDGERS = "ledgers"
 CANDIDATES = "candidates"
 
 
@@ -73,14 +73,25 @@ def sketch_id_pattern(dataset: Dataset) -> str:
     return re.escape(dataset.value) + r"-w[1-9][0-9]*-d[1-9][0-9]*"
 
 
-def candidates_path(workspace: Path, sketch: str) -> Path:
-    return workspace / CANDIDATES / f"{sketch}.json"
+def instance(dataset: Dataset, min_count: int, memory_budget: int, query_budget: int) -> str:
+    """The task instance's name, which names its ledger and its candidate folder."""
+    return instance_name(dataset.value, min_count, memory_budget, query_budget)
 
 
-def read_ledger(workspace: Path) -> dict | None:
-    path = workspace / LEDGER
+def candidates_path(workspace: Path, name: str, sketch: str) -> Path:
+    return workspace / CANDIDATES / name / f"{sketch}.json"
+
+
+def ledger_path(workspace: Path, name: str) -> Path:
+    return workspace / LEDGERS / f"{name}.json"
+
+
+def read_ledger(workspace: Path, name: str) -> dict | None:
+    path = ledger_path(workspace, name)
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def write_ledger(workspace: Path, ledger: dict) -> None:
-    (workspace / LEDGER).write_text(json.dumps(ledger) + "\n")
+def write_ledger(workspace: Path, name: str, ledger: dict) -> None:
+    path = ledger_path(workspace, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(ledger) + "\n")

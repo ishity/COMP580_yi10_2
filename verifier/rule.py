@@ -1,4 +1,4 @@
-"""Decimal strings and the histogram rule, in integer and Fraction arithmetic only.
+"""Decimal strings, the histogram rule and instance names, in integer and Fraction arithmetic only.
 
 src/plugin/rule.py and verifier/rule.py hold this same file, so the tools and the verifier decide alike.
 """
@@ -42,3 +42,10 @@ def histogram(estimates, min_count):
             buckets.append((min(group), max(group), len(group), start + 1, rank))
             start = rank
     return buckets
+
+
+def instance_name(dataset, min_count, memory_budget, query_budget):
+    """The name of one task instance's ledger and candidate folder, built from every value the ledger locks, so
+    that different instances in one workspace never share a ledger. All four are integers, written as they are;
+    min_recall, the task's only decimal, is never passed to a tool and so is not locked."""
+    return f"{dataset}-k{min_count}-m{memory_budget}-q{query_budget}"

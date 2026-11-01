@@ -4,9 +4,8 @@ The first failing check decides: malformed pairs, the budgets, precision, proven
 """
 
 from fractions import Fraction
-from pathlib import Path
 
-from .checks import LEDGER, charges_problem, read_json, result
+from .checks import charges_problem, instance_of, ledger_file, ledger_problem, read_json, result
 from .rule import parse_decimal
 
 
@@ -32,21 +31,14 @@ def verify_task(arguments, output, reference, workspace):
         return result(False, "a pair is submitted twice, counting (a, b) and (b, a) as one pair")
 
     # 2. Budgets: the ledger is this task's, its sketches fit the memory budget and its counts the query budget.
-    ledger = read_json(Path(workspace) / LEDGER)
+    name = instance_of(arguments)
+    ledger = read_json(ledger_file(workspace, name))
     if ledger is None and submitted:
-        return result(False, f"there is no {LEDGER}, so no submitted pair was counted")
+        return result(False, f"there is no ledger for this task, ledgers/{name}.json, so no submitted pair was counted")
     sketches = [] if ledger is None else ledger["sketches"]
     calls = [] if ledger is None else ledger["counts"]
     if ledger is not None:
-        if (ledger["dataset"], ledger["min_count"], ledger["memory_budget"]) != (
-            arguments.dataset.value,
-            arguments.min_count,
-            arguments.memory_budget,
-        ) or ledger["query_budget"] not in (None, arguments.query_budget):
-            return result(False, "the ledger is for another dataset, min_count, memory_budget or query_budget than the task")
-        if calls and ledger["query_budget"] is None:
-            return result(False, "the ledger counts pairs without a query budget")
-        problem = charges_problem(ledger)
+        problem = ledger_problem(ledger, arguments) or charges_problem(ledger)
         if problem:
             return result(False, problem)
     memory = sum(sketch["charged"] for sketch in sketches)

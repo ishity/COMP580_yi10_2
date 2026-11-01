@@ -12,10 +12,11 @@ import verifier
 import verifier.rule
 from contract import TOOLS, CountInput, Dataset, DescribeInput, FindInput, SketchInput, Tool
 from plugin import build_sketch, count_pairs, describe_corpus, exact_frequent_pairs, rule
-from plugin.bundle import LEDGER, hash_rows, load
+from plugin.bundle import candidates_path, hash_rows, instance, ledger_path, load
 
 ROOT = Path(__file__).resolve().parents[1]
-EDGE = {"dataset": Dataset.EDGE_CASES, "min_count": 3}
+EDGE = {"dataset": Dataset.EDGE_CASES, "min_count": 3, "memory_budget": 16, "query_budget": 8}
+EDGE_NAME = "edge-cases-k3-m16-q8"
 
 
 def checked(tool: Tool, given, made, workspace: Path) -> dict:
@@ -29,15 +30,19 @@ def checked(tool: Tool, given, made, workspace: Path) -> dict:
     )
 
 
-def sketch(workspace: Path, width: int, depth: int, memory_budget: int = 16, **changes):
-    given = SketchInput(width=width, depth=depth, memory_budget=memory_budget, **(EDGE | changes))
+def sketch(workspace: Path, width: int, depth: int, **changes):
+    given = SketchInput(width=width, depth=depth, **(EDGE | changes))
     return given, build_sketch(given, workspace)
 
 
-def count(workspace: Path, start: int, number: int, query_budget: int = 8, sketch_id: str = "edge-cases-w8-d2", **changes):
-    fields = {"sketch_id": sketch_id, "start_rank": start, "count": number, "query_budget": query_budget}
+def count(workspace: Path, start: int, number: int, sketch_id: str = "edge-cases-w8-d2", **changes):
+    fields = {"sketch_id": sketch_id, "start_rank": start, "count": number}
     given = CountInput(**(EDGE | fields | changes))
     return given, count_pairs(given, workspace)
+
+
+def ledger(workspace: Path, name: str = EDGE_NAME) -> dict:
+    return json.loads(ledger_path(workspace, name).read_text())
 
 
 def slow_counts(dataset: Dataset) -> Counter[tuple[str, str]]:
@@ -68,9 +73,10 @@ def test_describe_corpus_counts_the_bundle(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(("width", "depth"), [(1, 1), (37, 1), (100, 3), (500, 2), (1000, 4), (64, 16)])
 def test_the_sketch_never_underestimates_a_pair(tmp_path: Path, width: int, depth: int) -> None:
-    given = SketchInput(dataset=Dataset.ACL_SMALL, width=width, depth=depth, min_count=1, memory_budget=width * depth)
+    memory = width * depth
+    given = SketchInput(Dataset.ACL_SMALL, width, depth, min_count=1, memory_budget=memory, query_budget=1)
     build_sketch(given, tmp_path)
-    saved = json.loads((tmp_path / "candidates" / f"acl-small-w{width}-d{depth}.json").read_text())
+    saved = json.loads((tmp_path / "candidates" / f"acl-small-k1-m{memory}-q1" / f"acl-small-w{width}-d{depth}.json").read_text())
     truth = slow_counts(Dataset.ACL_SMALL)
     estimates = {(a, b): estimate for a, b, estimate in saved["candidates"]}
     assert set(estimates) == set(truth)  # min_count 1: every pair of the stream is a candidate
@@ -80,18 +86,19 @@ def test_the_sketch_never_underestimates_a_pair(tmp_path: Path, width: int, dept
 
 
 def test_build_sketch_is_deterministic_and_ranked(tmp_path: Path) -> None:
-    given = SketchInput(dataset=Dataset.ACL_FULL, width=1500, depth=2, min_count=55, memory_budget=3000)
+    given = SketchInput(Dataset.ACL_FULL, width=1500, depth=2, min_count=55, memory_budget=3000, query_budget=400)
+    path = Path("candidates", "acl-full-k55-m3000-q400", "acl-full-w1500-d2.json")
     first = build_sketch(given, tmp_path / "one")
     second = build_sketch(given, tmp_path / "two")
     assert first == second and first.sketch_id == "acl-full-w1500-d2" and first.candidates == 646
-    saved = (tmp_path / "one" / "candidates" / "acl-full-w1500-d2.json").read_text()
-    assert saved == (tmp_path / "two" / "candidates" / "acl-full-w1500-d2.json").read_text()
+    saved = (tmp_path / "one" / path).read_text()
+    assert saved == (tmp_path / "two" / path).read_text()
     assert sum(row.candidates for row in first.histogram) == first.candidates
     assert first.histogram[0].first_rank == 1 and first.histogram[-1].last_rank == first.candidates
     assert checked(Tool.BUILD_SKETCH, given, first, tmp_path / "one")["valid"] is True
     run = json.loads(saved)
     run["candidates"].reverse()
-    (tmp_path / "one" / "candidates" / "acl-full-w1500-d2.json").write_text(json.dumps(run))
+    (tmp_path / "one" / path).write_text(json.dumps(run))
     assert checked(Tool.BUILD_SKETCH, given, first, tmp_path / "one")["valid"] is False
 
 
@@ -114,7 +121,7 @@ def test_build_sketch_refuses_a_sketch_over_the_memory_left(tmp_path: Path) -> N
         sketch(tmp_path, 4, 2)
     with pytest.raises(ValueError, match="no sketch of depth 7 fits"):
         sketch(tmp_path, 1, 7)
-    assert len(json.loads((tmp_path / LEDGER).read_text())["sketches"]) == 1
+    assert len(ledger(tmp_path)["sketches"]) == 1
 
 
 @pytest.mark.parametrize(
@@ -125,30 +132,52 @@ def test_build_sketch_refuses_a_sketch_over_the_memory_left(tmp_path: Path) -> N
         ({"depth": 17}, "depth must be from 1 to 16"),
         ({"min_count": 0}, "min_count must be at least 1"),
         ({"memory_budget": 0}, "memory_budget must be at least 1"),
+        ({"query_budget": 0}, "query_budget must be at least 1"),
     ],
 )
 def test_build_sketch_says_what_is_wrong(tmp_path: Path, changes: dict, message: str) -> None:
-    fields = {"width": 2, "depth": 2, "memory_budget": 16} | changes
+    fields = {"width": 2, "depth": 2} | changes
     with pytest.raises(ValueError, match=message):
         sketch(tmp_path, **fields)
 
 
-def test_the_ledger_keeps_the_task_fixed(tmp_path: Path) -> None:
+def test_each_instance_keeps_its_own_ledger(tmp_path: Path) -> None:
     sketch(tmp_path, 4, 2)
-    with pytest.raises(ValueError, match="pass memory_budget 16"):
-        sketch(tmp_path, 4, 2, memory_budget=17)
-    with pytest.raises(ValueError, match="pass min_count 3"):
-        sketch(tmp_path, 4, 2, min_count=2)
+    _, made = sketch(tmp_path, 4, 2, memory_budget=17)
+    assert (made.counters_charged, made.memory_used) == (8, 8)  # another instance, charged on its own ledger
+    sketch(tmp_path, 4, 2, min_count=2)
+    assert sorted(path.name for path in (tmp_path / "ledgers").iterdir()) == [
+        "edge-cases-k2-m16-q8.json", "edge-cases-k3-m16-q8.json", "edge-cases-k3-m17-q8.json"
+    ]
+    assert instance(Dataset.EDGE_CASES, 3, 16, 8) == EDGE_NAME
     count(tmp_path, 1, 1, sketch_id="edge-cases-w4-d2")
-    with pytest.raises(ValueError, match="pass query_budget 8"):
+    with pytest.raises(ValueError, match="no sketch is built for .* query_budget 9: call build_sketch first"):
         count(tmp_path, 2, 1, sketch_id="edge-cases-w4-d2", query_budget=9)
-    with pytest.raises(ValueError, match="pass min_count 3"):
-        count(tmp_path, 2, 1, sketch_id="edge-cases-w4-d2", min_count=4)
+    assert len(ledger(tmp_path)["counts"]) == 1 and ledger(tmp_path, "edge-cases-k3-m17-q8")["counts"] == []
+
+
+def test_count_pairs_returns_skipped_qualifying_pairs_as_previously_counted(tmp_path: Path) -> None:
+    sketch(tmp_path, 8, 2)
+    given, first = count(tmp_path, 1, 3)
+    assert [pair.previously_counted for pair in first.qualifying] == [False, False]
+    given, again = count(tmp_path, 1, 3)
+    assert (again.counted, again.skipped, again.total_counted) == (0, 3, 3)
+    assert [(pair.a, pair.b, pair.count) for pair in again.qualifying] == [
+        (pair.a, pair.b, pair.count) for pair in first.qualifying
+    ]
+    assert all(pair.previously_counted for pair in again.qualifying)
+    assert ledger(tmp_path)["counts"][-1]["qualifying"] == []  # the ledger records each pair's count once
+    assert checked(Tool.COUNT_PAIRS, given, again, tmp_path)["valid"] is True
+    again.qualifying[0].previously_counted = False
+    assert checked(Tool.COUNT_PAIRS, given, again, tmp_path)["valid"] is False
+    again.qualifying[0].previously_counted = True
+    again.qualifying[0].count += 1
+    assert checked(Tool.COUNT_PAIRS, given, again, tmp_path)["valid"] is False
 
 
 def test_collisions_inflate_estimates_as_built(tmp_path: Path) -> None:
     sketch(tmp_path, 8, 2)
-    saved = json.loads((tmp_path / "candidates" / "edge-cases-w8-d2.json").read_text())
+    saved = json.loads(candidates_path(tmp_path, EDGE_NAME, "edge-cases-w8-d2").read_text())
     estimates = {(a, b): estimate for a, b, estimate in saved["candidates"]}
     assert estimates[("delta", "iota")] == 5  # true count 1, collides with (beta, gamma) in both rows
     assert ("eta", "zeta") not in estimates  # true count 1, collides in row 0 only
@@ -169,8 +198,7 @@ def test_count_pairs_counts_exactly_and_charges_only_new_pairs(built: Path) -> N
     given, made = count(built, 2, 2)
     assert (made.counted, made.skipped, made.total_counted, made.remaining) == (1, 1, 3, 5)
     assert checked(Tool.COUNT_PAIRS, given, made, built)["valid"] is True
-    ledger = json.loads((built / LEDGER).read_text())
-    found = [pair for call in ledger["counts"] for pair in call["qualifying"]]
+    found = [pair for call in ledger(built)["counts"] for pair in call["qualifying"]]
     assert sorted((pair["a"], pair["b"], pair["count"]) for pair in found) == [
         ("alpha", "beta", 3),
         ("beta", "gamma", 4),
@@ -178,13 +206,15 @@ def test_count_pairs_counts_exactly_and_charges_only_new_pairs(built: Path) -> N
 
 
 def test_count_pairs_refuses_a_range_over_budget_and_says_what_fits(built: Path) -> None:
+    sketch(built, 8, 2, query_budget=2)
     with pytest.raises(ValueError, match=r"hold 3 pairs not yet counted \(0 already counted\), but only 2 of the query"
                        r" budget 2 remain: with start_rank 1, count may be at most 2"):
         count(built, 1, 3, query_budget=2)
-    assert json.loads((built / LEDGER).read_text())["counts"] == []
+    assert ledger(built, "edge-cases-k3-m16-q2")["counts"] == []
     count(built, 1, 2, query_budget=2)
     given, made = count(built, 1, 2, query_budget=2)
-    assert (made.counted, made.skipped, made.qualifying) == (0, 2, [])
+    assert (made.counted, made.skipped) == (0, 2)
+    assert made.qualifying and all(pair.previously_counted for pair in made.qualifying)
     assert checked(Tool.COUNT_PAIRS, given, made, built)["valid"] is True
     with pytest.raises(ValueError, match="count may be at most 2; the query budget is used up"):
         count(built, 1, 3, query_budget=2)
@@ -198,6 +228,8 @@ def test_count_pairs_refuses_a_range_over_budget_and_says_what_fits(built: Path)
         ({"sketch_id": "../x"}, "is not a edge-cases sketch"),
         ({"start_rank": 0}, "at least 1"),
         ({"query_budget": 0}, "query_budget must be at least 1"),
+        ({"memory_budget": 0}, "memory_budget must be at least 1"),
+        ({"query_budget": 9}, "no sketch is built for dataset edge-cases, min_count 3, memory_budget 16 and query_budget 9"),
         ({"start_rank": 100}, "start_rank must be at most"),
         ({"count": 100}, "count may be at most"),
     ],
@@ -280,6 +312,9 @@ def test_the_instances_separate_settings(
     tmp_path: Path, dataset: Dataset, min_count: int, width: int, depth: int, query: int, recall: int
 ) -> None:
     """Counting the top query_budget ranks finds these many qualifying pairs, as measured at checkpoint 2."""
-    made = build_sketch(SketchInput(dataset, width, depth, min_count, width * depth), tmp_path)
-    found = count_pairs(CountInput(dataset, made.sketch_id, 1, min(query, made.candidates), min_count, query), tmp_path)
+    memory = width * depth
+    made = build_sketch(SketchInput(dataset, width, depth, min_count, memory, query), tmp_path)
+    found = count_pairs(
+        CountInput(dataset, made.sketch_id, 1, min(query, made.candidates), min_count, memory, query), tmp_path
+    )
     assert len(found.qualifying) == recall
